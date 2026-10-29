@@ -48,6 +48,6 @@ Lancer la fenêtre :
 
     py fenetre.py
 
-    Usage de l'IA
+    ## Usage de l'IA
 
 J’ai utilisé Claude, développé par Anthropic, lorsque je pensais avoir fait des erreurs ou lorsque je ne comprenais pas certaines parties du code. Je lui ai demandé des explications pour mieux comprendre le fonctionnement du programme et de l’aide pour trouver et corriger les erreurs. J’ai réalisé moi-même le diagramme sur papier, le journal de débogage et les justifications de mes choix. Cette aide m’a permis de mieux comprendre le code et d’apprendre de mes erreurs.
