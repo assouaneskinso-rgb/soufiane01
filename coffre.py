@@ -16,6 +16,12 @@ class AccesRefuse(ErreurCoffre):
     pass
 class DonneeInvalide(ErreurCoffre):
     pass
+class CompteExistant(DonneeInvalide):
+    pass
+class CompteBloque(AuthentificationEchouee):
+    pass
+class SecretIntrouvable(AccesRefuse):
+    pass
 class Secret(ABC):
     def __init__(self, proprietaire, libelle, valeur):
         self.__proprietaire = proprietaire
@@ -73,11 +79,12 @@ class Emetteur:
     def emettre(self, nom, **donnees):
         for fonction in self.__ecouteurs:
             fonction(nom, **donnees)
+TAILLE_MAX = 100
 _SEL_BIDON = bytes(16)
 _EMPREINTE_BIDON = bytes(32)
 class Coffre:
     def __init__(self, chemin_bd):
-        self.__bd = sqlite3.connect(str(chemin_bd))
+        self.__bd = sqlite3.connect(str(chemin_bd), check_same_thread=False)
         self.__bd.execute("""
             CREATE TABLE IF NOT EXISTS compte (
                 matricule TEXT PRIMARY KEY,
@@ -121,7 +128,7 @@ class Coffre:
                 " VALUES (?, ?, ?, ?)", (matricule, role, sel, empreinte))
             self.__bd.commit()
         except sqlite3.IntegrityError:
-            raise DonneeInvalide("Ce matricule existe déjà.")
+            raise CompteExistant("Ce matricule existe déjà.")
         self.__noter(matricule, "COMPTE_CREE", "role=" + role)
     def ouvrir_session(self, matricule, mdp_maitre):
         if not (isinstance(matricule, str) and re.fullmatch(r"[0-9]{7}", matricule)):
@@ -138,7 +145,7 @@ class Coffre:
         bon = hmac.compare_digest(essai, empreinte) and existe
         if existe and echecs >= 3:
             self.__noter(matricule, "CONNEXION_REFUSEE", "compte bloqué")
-            raise AuthentificationEchouee("Identifiants invalides.")
+            raise CompteBloque("Compte bloqué.")
         if not bon:
             if existe:
                 self.__bd.execute(
@@ -210,6 +217,72 @@ class Coffre:
         ).fetchall()
         self.__noter(s.matricule, "JOURNAL_CONSULTE")
         return [f"{q} | {a or '-'} | {act} | {d}" for q, a, act, d in lignes]
+    def lister_meta(self, session, genre=None, tri="date", page=1, taille=20):
+        s = self.__session(session)
+        if genre is not None and genre not in _GENRES:
+            raise DonneeInvalide("Genre : motdepasse, cleapi ou note.")
+        if tri not in ("date", "libelle", "genre"):
+            raise DonneeInvalide("Tri : date, libelle ou genre.")
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            raise DonneeInvalide("Page : entier >= 1.")
+        if (isinstance(taille, bool) or not isinstance(taille, int)
+                or not 1 <= taille <= TAILLE_MAX):
+            raise DonneeInvalide(f"Taille : entier entre 1 et {TAILLE_MAX}.")
+        ordre = {"date": "id", "libelle": "libelle COLLATE NOCASE, id",
+                 "genre": "genre, id"}[tri]
+        filtre, params = "proprietaire = ?", [s.matricule]
+        if genre is not None:
+            filtre += " AND genre = ?"
+            params.append(genre)
+        total = self.__bd.execute(
+            "SELECT COUNT(*) FROM secret WHERE " + filtre, params).fetchone()[0]
+        lignes = self.__bd.execute(
+            "SELECT id, genre, libelle FROM secret WHERE " + filtre
+            + " ORDER BY " + ordre + " LIMIT ? OFFSET ?",
+            params + [taille, (page - 1) * taille]).fetchall()
+        return {"total": total, "page": page, "taille": taille,
+                "secrets": [{"id": i, "genre": g, "libelle": lib}
+                            for i, g, lib in lignes]}
+    def __secret_du_proprietaire(self, s, id_secret, action):
+        if isinstance(id_secret, bool) or not isinstance(id_secret, int):
+            raise SecretIntrouvable("Introuvable.")
+        ligne = self.__bd.execute(
+            "SELECT proprietaire, genre, libelle FROM secret WHERE id = ?",
+            (id_secret,)).fetchone()
+        if ligne is None:
+            self.__noter(s.matricule, "ACCES_REFUSE", f"{action} id={id_secret} inexistant")
+            raise SecretIntrouvable("Introuvable.")
+        if ligne[0] != s.matricule:
+            self.__noter(s.matricule, "ACCES_REFUSE", f"{action} id={id_secret}")
+            raise AccesRefuse("Accès refusé.")
+        return ligne
+    def metadonnees(self, session, id_secret):
+        s = self.__session(session)
+        _, genre, libelle = self.__secret_du_proprietaire(s, id_secret, "metadonnees")
+        return {"id": id_secret, "genre": genre, "libelle": libelle}
+    def valeur(self, session, id_secret):
+        s = self.__session(session)
+        self.__secret_du_proprietaire(s, id_secret, "reveler")
+        return self.reveler(session, id_secret)
+    def supprimer(self, session, id_secret):
+        s = self.__session(session)
+        self.__secret_du_proprietaire(s, id_secret, "supprimer")
+        self.__bd.execute("DELETE FROM secret WHERE id = ?", (id_secret,))
+        self.__bd.commit()
+        self.__noter(s.matricule, "SECRET_SUPPRIME", f"id={id_secret}")
+    def resume_journal(self, session):
+        s = self.__session(session)
+        if s.role != "responsable":
+            self.__noter(s.matricule, "ACCES_REFUSE", "journal")
+            raise AccesRefuse("Accès refusé.")
+        lignes = self.__bd.execute(
+            "SELECT action, COUNT(*) FROM audit GROUP BY action ORDER BY action"
+        ).fetchall()
+        total = self.__bd.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
+        self.__noter(s.matricule, "JOURNAL_CONSULTE", "resume")
+        return {"total": total, "par_action": {a: n for a, n in lignes}}
+    def session_valide(self, jeton):
+        return isinstance(jeton, str) and jeton in self.__sessions
     def fermer(self):
         self.__bd.close()
     def __noter(self, acteur, action, detail=""):
